@@ -1,0 +1,10 @@
+{
+  "name": "Explorer. Trip builder.",
+  "description": "An AI-powered trip planner that creates optimized itineraries with travel times, costs, and seasonal insights using Google Maps data.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
