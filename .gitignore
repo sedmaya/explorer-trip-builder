@@ -7,3 +7,7 @@ coverage/
 .env*
 !.env.example
 PROJECT_OPTIMIZATION_SUMMARY.md
+
+# Ignore Service Account credentials keys
+gcp-key.json
+*key.json
