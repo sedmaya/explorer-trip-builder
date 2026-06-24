@@ -426,67 +426,88 @@ app.post("/api/generate-trip-plan", async (req, res) => {
     if (!inputs) return res.status(400).json({ error: "Missing trip inputs." });
     
     const diffDays = Math.ceil(Math.abs(new Date(inputs.endDate).getTime() - new Date(inputs.startDate).getTime()) / 86400000) + 1;
-    const model = MODEL_HIERARCHY[preferredModelIndex];
+    let success = false;
+    let attempts = 0;
+    let lastError: any = null;
+    let responseData: any = null;
 
-    console.log(`[Orchestrator] Starting Multi-Engine generation for ${diffDays} days...`);
+    while (!success && attempts < MODEL_HIERARCHY.length) {
+      const currentModelIdx = (preferredModelIndex + attempts) % MODEL_HIERARCHY.length;
+      const model = MODEL_HIERARCHY[currentModelIdx];
+      console.log(`[Orchestrator] Attempting generation with model: ${model} (attempt ${attempts + 1}/${MODEL_HIERARCHY.length})...`);
+      
+      try {
+        // 1. Research Engine: Gather factual data for ALL locations (Visits + Overnights + Flights)
+        const researchLocations = [
+          ...inputs.placesToVisit,
+          ...(inputs.preferredOvernights?.map(o => ({ location: o.location })) || []),
+          ...(inputs.flights?.flatMap(f => [{ location: f.departureAirport }, { location: f.arrivalAirport }]) || [])
+        ];
+        
+        // Deduplicate research locations by clean name
+        const uniqueLocations = researchLocations.filter((v, i, a) => 
+          a.findIndex(t => aggressiveClean(t.location).toLowerCase() === aggressiveClean(v.location).toLowerCase()) === i
+        );
 
-    // 1. Research Engine: Gather factual data for ALL locations (Visits + Overnights + Flights)
-    const researchLocations = [
-      ...inputs.placesToVisit,
-      ...(inputs.preferredOvernights?.map(o => ({ location: o.location })) || []),
-      ...(inputs.flights?.flatMap(f => [{ location: f.departureAirport }, { location: f.arrivalAirport }]) || [])
-    ];
-    
-    // Deduplicate research locations by clean name
-    const uniqueLocations = researchLocations.filter((v, i, a) => 
-      a.findIndex(t => aggressiveClean(t.location).toLowerCase() === aggressiveClean(v.location).toLowerCase()) === i
-    );
+        const researchData = await runResearchEngine(uniqueLocations, model);
 
-    const researchData = await runResearchEngine(uniqueLocations, model);
+        // 2. Route Optimization Engine: Plan the sequence
+        const routeData = await runRouteEngine(inputs, researchData, diffDays, model);
 
-    // 2. Route Optimization Engine: Plan the sequence
-    const routeData = await runRouteEngine(inputs, researchData, diffDays, model);
+        // 3. Time Management Engine: Deterministic Waterfall & Limit Enforcement
+        const { itinerary, unreachablePlaces } = runTimeEngine(inputs, routeData, researchData);
 
-    // 3. Time Management Engine: Deterministic Waterfall & Limit Enforcement
-    const { itinerary, unreachablePlaces } = runTimeEngine(inputs, routeData, researchData);
+        // 4. Advisory Engine: Generate narrative and summaries
+        const advisory = await runAdvisoryEngine(inputs, { itinerary }, unreachablePlaces, model);
 
-    // 4. Advisory Engine: Generate narrative and summaries
-    const advisory = await runAdvisoryEngine(inputs, { itinerary }, unreachablePlaces, model);
+        // Final Pass: Reconstruct Travel Labels for the UI
+        itinerary.forEach((day, dayIdx) => {
+          day.stops.forEach((stop, stopIdx) => {
+            if (stop.type === 'travel') {
+              let origin = "";
+              if (stopIdx > 0) origin = aggressiveClean(day.stops[stopIdx - 1].location);
+              else if (dayIdx > 0) {
+                const prevDayStops = itinerary[dayIdx - 1].stops;
+                if (prevDayStops.length > 0) origin = aggressiveClean(prevDayStops[prevDayStops.length - 1].location);
+              }
+              if (!origin) origin = inputs.startPoint;
 
-    // Final Pass: Reconstruct Travel Labels for the UI
-    itinerary.forEach((day, dayIdx) => {
-      day.stops.forEach((stop, stopIdx) => {
-        if (stop.type === 'travel') {
-          let origin = "";
-          if (stopIdx > 0) origin = aggressiveClean(day.stops[stopIdx - 1].location);
-          else if (dayIdx > 0) {
-            const prevDayStops = itinerary[dayIdx - 1].stops;
-            if (prevDayStops.length > 0) origin = aggressiveClean(prevDayStops[prevDayStops.length - 1].location);
+              const destination = aggressiveClean(stop.location);
+              if (origin === destination) stop.location = `Local transit in ${destination}`;
+              else stop.location = `Travel from: ${origin} to: ${destination}`;
+            }
+          });
+        });
+
+        responseData = {
+          tripName: advisory.tripName || "Optimized Journey",
+          summary: advisory.summary,
+          routeSequence: routeData.days.flatMap((d: any) => d.sequence.map((s: any) => s.location)),
+          itinerary,
+          optimizationSuggestions: advisory.optimizationSuggestions,
+          preparationInfo: advisory.preparationInfo,
+          feasibility: {
+            feasible: unreachablePlaces.length === 0,
+            score: Math.max(0, 100 - (unreachablePlaces.length * 20)),
+            unreachablePlaces,
+            reasons: unreachablePlaces.map(p => `Could not fit ${p} within ${inputs.dailyEndTime}.`),
+            bottlenecks: []
           }
-          if (!origin) origin = inputs.startPoint;
-
-          const destination = aggressiveClean(stop.location);
-          if (origin === destination) stop.location = `Local transit in ${destination}`;
-          else stop.location = `Travel from: ${origin} to: ${destination}`;
-        }
-      });
-    });
-
-    return res.json({
-      tripName: advisory.tripName || "Optimized Journey",
-      summary: advisory.summary,
-      routeSequence: routeData.days.flatMap((d: any) => d.sequence.map((s: any) => s.location)),
-      itinerary,
-      optimizationSuggestions: advisory.optimizationSuggestions,
-      preparationInfo: advisory.preparationInfo,
-      feasibility: {
-        feasible: unreachablePlaces.length === 0,
-        score: Math.max(0, 100 - (unreachablePlaces.length * 20)),
-        unreachablePlaces,
-        reasons: unreachablePlaces.map(p => `Could not fit ${p} within ${inputs.dailyEndTime}.`),
-        bottlenecks: []
+        };
+        success = true;
+        preferredModelIndex = currentModelIdx; // Update to the working model
+      } catch (err: any) {
+        console.warn(`[Orchestrator] Error with model ${model}:`, err.message || err);
+        lastError = err;
+        attempts++;
       }
-    });
+    }
+
+    if (success && responseData) {
+      return res.json(responseData);
+    } else {
+      throw lastError || new Error("All models in the hierarchy failed to generate the trip plan.");
+    }
   } catch (err: any) {
     console.error("Orchestration Error:", err);
     res.status(500).json({ error: err.message });
