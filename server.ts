@@ -13,23 +13,10 @@ const PORT = 3000;
 
 app.use(express.json({ limit: '10mb' }));
 
-// Server-side initialization of Gemini.
-// Supports both Vertex AI (Google Cloud) and Gemini API Key (AI Studio free tier).
-const useVertexAI =
-  process.env.GOOGLE_GENAI_USE_VERTEXAI === "true" ||
-  (!!process.env.GOOGLE_CLOUD_PROJECT && !process.env.GEMINI_API_KEY);
-
-const ai = new GoogleGenAI(
-  useVertexAI
-    ? {
-        vertexai: true,
-        project: process.env.GOOGLE_CLOUD_PROJECT,
-        location: process.env.GOOGLE_CLOUD_LOCATION || "us-central1",
-      }
-    : {
-        apiKey: process.env.GEMINI_API_KEY!,
-      }
-);
+// Server-side initialization of Gemini using the AI Studio developer API key.
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY!,
+});
 
 
 // Adaptive Model Management
